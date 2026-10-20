@@ -754,21 +754,63 @@ function schedule() {
     music.next += eighth; music.step++;
   }
 }
+// iPhone tắt tiếng WebAudio khi gạt nút im lặng. Phát kèm một thẻ <audio> im lặng
+// để Safari chuyển sang chế độ "phát nhạc", lúc đó nhạc kêu cả khi máy đang để im lặng.
+let silentAudio = null;
+function silentWavUrl() {
+  const rate = 8000, n = rate / 2, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const str = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); str(8, "WAVE"); str(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, "data"); v.setUint32(40, n * 2, true);
+  return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+}
+function unlockAudio() {
+  try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) {}
+  try {
+    if (!silentAudio) {
+      silentAudio = new Audio(silentWavUrl());
+      silentAudio.loop = true; silentAudio.setAttribute("playsinline", ""); silentAudio.preload = "auto";
+    }
+    const p = silentAudio.play(); if (p && p.catch) p.catch(() => {});
+  } catch (e) {}
+  // Phát ngay một mẫu rỗng trong lúc chạm để trình duyệt điện thoại cho phép âm thanh
+  const c = music.ctx, b = c.createBuffer(1, 1, 22050), src = c.createBufferSource();
+  src.buffer = b; src.connect(c.destination); src.start(0);
+}
 function startMusic() {
   try {
     if (!music.ctx) {
       music.ctx = new (window.AudioContext || window.webkitAudioContext)();
-      music.gain = music.ctx.createGain(); music.gain.gain.value = .8;
+      const comp = music.ctx.createDynamicsCompressor();
+      comp.threshold.value = -14; comp.ratio.value = 4;
+      comp.connect(music.ctx.destination);
+      music.gain = music.ctx.createGain(); music.gain.gain.value = 1.6;
       const delay = music.ctx.createDelay(); delay.delayTime.value = .32;
       const fb = music.ctx.createGain(); fb.gain.value = .28;
-      music.gain.connect(music.ctx.destination); music.gain.connect(delay); delay.connect(fb); fb.connect(delay); delay.connect(music.ctx.destination);
+      music.gain.connect(comp); music.gain.connect(delay); delay.connect(fb); fb.connect(delay); delay.connect(comp);
     }
-    music.ctx.resume(); music.next = music.ctx.currentTime + .1;
+    unlockAudio(); // phải chạy ngay trong lúc chạm, không đợi
+    const go = () => { music.next = music.ctx.currentTime + .1; };
+    const r = music.ctx.resume(); go(); if (r && r.then) r.then(go);
+    clearInterval(music.timer);
     music.timer = setInterval(schedule, 80); music.on = true;
   } catch (e) { music.on = false; }
   syncMusicBtn();
 }
-function stopMusic() { clearInterval(music.timer); music.on = false; music.ctx && music.ctx.suspend(); syncMusicBtn(); }
+function stopMusic() {
+  clearInterval(music.timer); music.on = false;
+  music.ctx && music.ctx.suspend();
+  silentAudio && silentAudio.pause();
+  syncMusicBtn();
+}
+// Quay lại trang sau khi chuyển ứng dụng thì nối lại nhạc (iPhone hay tự ngắt)
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && music.on && music.ctx && music.ctx.state !== "running") {
+    music.ctx.resume().then(() => { music.next = music.ctx.currentTime + .1; }).catch(() => {});
+  }
+});
 function syncMusicBtn() {
   $("music").classList.toggle("on", music.on); $("music").setAttribute("aria-pressed", music.on);
   $("music-label").textContent = music.on ? "Tắt nhạc" : "Bật nhạc";
